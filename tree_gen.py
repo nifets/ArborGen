@@ -5,7 +5,7 @@
 # flower blooming). 
 
 #temp
-ITERATIONS = 3
+ITERATIONS = 15
 
 TIME_INTERVAL = 5 # how often to update simulation
 
@@ -16,7 +16,7 @@ import numpy
 
 from mathutils import Vector, Matrix, Euler
 
-from typing import NamedTuple, List
+from typing import NamedTuple, List, Tuple
 
 # Random stuff :)
 #---------------------------------------------------------------------------------
@@ -52,13 +52,60 @@ class RandomMesh:
         bpy.context.collection.objects.link(mesh)
         return mesh
 
+RM = RandomMesh
+
+# Blender utility 
+#---------------------------------------------------------------------------------
+def createBone(rig, name, headLoc, tailLoc, parentName = None, 
+               connected = False, inheritScale = 'NONE'):
+    # select the armature
+    bpy.context.view_layer.objects.active = rig
+    # go into edit mode to add bones
+    bpy.ops.object.mode_set(mode='EDIT', toggle=False)
+    # add a bone to the armature
+    bone = rig.data.edit_bones.new(name)
+    bone.head = headLoc
+    bone.tail = tailLoc
+    
+    # set parent if applicable
+    if parentName is not None:
+        parent = rig.data.edit_bones[parentName]
+        bone.parent = parent
+    
+    # set properties
+    bone.use_connect = connected
+    bone.inherit_scale = inheritScale
+    
+    # go back into object mode
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+# Create a vertex group that assigns full weights to the bone with the given name
+def createVertexGroup(name, object):
+    #assign vertex group weight
+    group = object.vertex_groups.new(name = name)
+    verts = []
+    for v in object.data.vertices:
+        verts.append(v.index)
+    group.add(verts, 1.0, 'ADD')
+
 
 # Tree part templates
+# These are used in the growth logic as a blueprint for the production rule
 #---------------------------------------------------------------------------------
 
 # Production rule for a stem segment
 class StemTemplate(NamedTuple):
-    lengthRatioR: RV # how much the stem should grow/shrink in relation to the previous one
+    meshR: RandomMesh # mesh of the stem
+
+class LeafTemplate(NamedTuple):
+    meshR: RandomMesh # mesh of the leaf
+    sizeR: RV         # size of the leaf
+
+# This encodes both a flower and its resulting fruit
+class FlowerTemplate(NamedTuple):
+    flowerMeshR: RandomMesh # mesh of the flower
+    fruitMeshR: RandomMesh  # mesh of the fruit
+    sizeR: RV               # size of the flower/fruit
 
 
 # Production rule for a bud 
@@ -66,20 +113,29 @@ class StemTemplate(NamedTuple):
 # Instead, that is encoded in the index variable
 # see Diagram 1 for angle explanation
 class BudTemplate(NamedTuple):
-    index: int # bud type index
-    brcAngleR: RV  # branching angle
-    divAngleR: RV  # divergence angle
-    rollAngleR: RV # roll angle
+    index: int       # bud type index
+    dominance: float # how much apical dominance the bud exhibits
+    brcAngleR: RV    # branching angle
+    divAngleR: RV    # divergence angle
+    rollAngleR: RV   # roll angle
     
     
-# Bud Logic  
+# Bud Growth Logic  
 #---------------------------------------------------------------------------------    
     
-# Represents one possible growth result of a bud
-class BudRule(NamedTuple):
+
+    
+# Production Rules
+
+class ShootGrowthRule(NamedTuple):
     stemT: StemTemplate 
+    lengthRatioR: RV     # how much the stem should grow/shrink 
+                         # in relation to the previous stem
     apiBudT: BudTemplate # apical bud
-    axiBudTs: List[BudTemplate] # axillary buds
+    axilTs: List[Tuple[BudTemplate, LeafTemplate]] # axillary buds and leaves
+    
+class FlowerGrowthRule(NamedTuple):
+    flowerT: FlowerTemplate
          
     
 # Describes what a specific bud type can grow into
@@ -87,15 +143,19 @@ class BudRule(NamedTuple):
 # Instances should only be created by using BudCollection.add
 # (not sure how to enforce this -- my python expertise -> 0
 class BudType:
-    def __init__(self, budRules, weights):
-        self.budRules = budRules
-        self.weights = weights
+    def __init__(self, shootRules, shootWeights, flowerRule):
+        self.shootRules = shootRules
+        self.shootWeights = shootWeights # list of probabilities of shoot rules
+        self.flowerRule = flowerRule
     
-    # Apply one of the rules (based on the probability distribution)
+    # Apply one of the shoot growth rules (based on the probability distribution)
     # Return a stem template and a list of axillary bud templates
-    def sprout(self):
-        rule = random.choices(self.budRules, self.weights)
+    def shootGrowth(self):
+        rule = random.choices(self.shootRules, self.shootWeights)
         return rule[0]
+    
+    def flowerGrowth(self):
+        return flowerRule
         
     
 # Stores all possible bud types of a tree
@@ -107,226 +167,290 @@ class BudCollection:
         self.buds = {}
     
     # add bud type to the collection
-    def add(self, index, budRules, weights):
-        budType = BudType(budRules, weights)
+    def add(self, index, shootRules, shootWeights, flowerRule):
+        budType = BudType(shootRules, shootWeights, flowerRule)
         self.buds[index] = budType
     
     # get the bud type at given index
     def get(self, index):
         return self.buds[index]
     
+    
 # Tree parts
 #---------------------------------------------------------------------------------  
 
-# Generic tree part, storing the blender object and corresponding bone
-class TreePart:
-    __slots__ = ('id', 'obj', 'bone')
-    
-    idGen = 1
-    name = "Part"
-    
-    def __init__(self, 
-                 randomMesh, rig, parentBone,
-                 boneLength = 0.2,
-                 worldMatrix = Matrix.Identity(4), 
-                 scaleMatrix = Matrix.Identity(4)):
-        # Assign an id to the tree part
-        self.id = TreePart.idGen
-        TreePart.idGen += 1
-        
-        #Create mesh
-        self.obj = randomMesh.get()
-        self.obj.matrix_world = worldMatrix @ scaleMatrix
-        self.obj.name = self.name + " " + str(self.id)
-        
-        #Create bone
-        self.addBone(rig, parentBone, worldMatrix, boneLength)
-        self.addVertexGroup()
-
-    # create bone for the tree part and add to the rig   
-    def addBone(self, rig, parentBone, worldMatrix, boneLength):
-        # select the armature
-        bpy.context.view_layer.objects.active = rig
-        # go into edit mode to add bones
-        bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-        # add a bone to the armature
-        bone = rig.data.edit_bones.new('bone_' + str(self.id))
-        # set its location
-        bone.head = worldMatrix.to_translation().freeze()
-        bone.tail = (worldMatrix @ Matrix.Translation((0, 0, boneLength))).to_translation().freeze()
-        
-        bone.parent = parentBone
-        bone.inherit_scale = 'ALIGNED'
-        # bone.use_connect = True
-        
-        self.bone = bone
-        
-        # go back into object mode
-        bpy.ops.object.mode_set(mode='OBJECT')
-        
-    def addVertexGroup(self):
-        #assign vertex group weight
-        group = self.obj.vertex_groups.new(name = 'bone_' + str(self.id))
-        verts = []
-        for v in self.obj.data.vertices:
-            verts.append(v.index)
-        group.add(verts, 1.0, 'ADD')
-    
-    
 # Represents the growing part of the tree, which can either develop into a stem 
 # (with new nodes and leaves attached) or into a flower.
-class Bud(TreePart):
+class Bud:
     __slots__ = (
-        'potential',  # how close the bud is to sprouting
-        'type',       # bud type
-        'stem',       # the stem this bud is attached to 
-        'apicalBud'   # the parent bud of this bud
+        'type',           # what kind of bud this is
+        'worldMatrix',    # world transform of the bud
+        'shootPotential', # how close the bud is to growing into a shoot
+        'flowerPotential',# how close the bud is to growing into a flower
+        'stem',           # the stem this bud is attached to 
+        'apicalBud',      # the parent bud of this bud
+        'age',             # how many shoots the bud produced
+        'dominance'
     )
     
-    name = "Bud"
-    
-    def __init__(self, randomMesh, rig, parentBone, budCollection, parentMatrix, 
-                 budT, stem = None, apicalBud = None):
-        # create the bud mesh
-        TreePart.__init__(self, randomMesh, rig, parentBone)
+    def __init__(self, tree, budT, parentMatrix, parentStem, apicalBud = None):
 
-        self.rig = rig
+        self.age = -1
 
         # set the apical bud
         self.apicalBud = apicalBud
-        
+            
+        # set the flower potential
+        self.flowerPotential = 0
+            
         # apply the template and set the world transformation of the mesh
-        self.renew(budCollection, parentMatrix, budT, stem, parentBone)
-    
-    # Transform the bud after it had sprouted
-    def renew(self, budCollection, parentMatrix, budT, stem):
+        self.renew(tree, budT, parentMatrix, parentStem)
+        
+    # Transform the bud after it has sprouted into a shoot
+    def renew(self, tree, budT, parentMatrix, parentStem):
+        self.age += 1
+        
         # set the type of the bud
         self.type = budCollection.get(budT.index)
-                
+                    
+        # set dominance
+        self.dominance = budT.dominance
+                    
         # set the parent stem
-        self.stem = stem
-        
-        self.potential = 0
-        
+        self.stem = parentStem
+            
+        # reset shoot potential
+        self.shootPotential = 0
+            
         # calculate the world transform of the bud from the budT angles
         divAngle = math.radians(budT.divAngleR.get())
         brcAngle = math.radians(budT.brcAngleR.get())
         rollAngle = math.radians(budT.rollAngleR.get())
-        
         eul = Euler((0.0, brcAngle, divAngle), 'XYZ').to_matrix().to_4x4()
         roll = Matrix.Rotation(rollAngle, 4, 'Z')
-        worldMatrix = parentMatrix @ eul @ roll
+            
+        self.worldMatrix = parentMatrix @ eul @ roll
         
-        self.obj.matrix_world = worldMatrix
+    
+    # Update the bud with the given potentials.
+    def update(self, shootPotential, flowerPotential):
+        self.shootPotential += shootPotential
+        self.flowerPotential += flowerPotential
+        # how much is the growth of this bud inhibited by the axilarry bud
+        isInhibited = False
+        if self.age is 0 and self.apicalBud is not None: #if axilarry bud
+            distance = (self.apicalBud.worldMatrix.to_translation() - self.worldMatrix.to_translation()).length
+            if distance / self.apicalBud.dominance < 1:
+                isInhibited = True
+
+        if self.shootPotential > 1 and not isInhibited:
+            return self.type.shootGrowth()
+        elif self.flowerPotential > 1 and self.age > 0:
+            return self.type.flowerGrowth()
+        return None
+    
+    # When the bud disappears, it has no influence over the child buds
+    def done(self):
+        self.dominance = 0.0001
+    
+
+class MeshPart:
+    __slots__ = ('id', 'obj', 'boneName')
+    def __init__(self, id, randomMesh, rig, parentId,
+                 boneLength = 1, connected = False, inheritScale = 'NONE',
+                 worldMatrix = Matrix.Identity(4), 
+                 scaleMatrix = Matrix.Identity(4)):
+        self.id = id
         
-        # select the armature
-        bpy.context.view_layer.objects.active = rig
-        # go into edit mode 
-        bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-        # set its location
-        self.bone.head = worldMatrix.to_translation().freeze()
-        self.bone.tail = (worldMatrix @ Matrix.Translation((0, 0, 0.2))).to_translation().freeze()
+        #Create mesh
+        self.obj = randomMesh.get()
+        self.obj.matrix_world = worldMatrix @ scaleMatrix
+        self.obj.name = "mesh_" + str(self.id)
         
-        self.bone.parent = stem.bone
+        #Create bone
+        self.boneName = "bone_" + str(self.id)
+        parentName = "bone_" + str(parentId)
+        headLoc = worldMatrix.to_translation()
+        tailLoc = (worldMatrix @ Matrix.Translation((0, 0, boneLength))).to_translation()
+        
+        createBone(rig, self.boneName, headLoc, tailLoc, 
+                   parentName, connected, inheritScale)
+        
+        #Create vertex group
+        createVertexGroup(self.boneName, self.obj)
+        
+# A woody segment of the tree between 2 consecutive nodes. Features secondary growth (widening)   
+class Stem:
+    __slots__ = ('meshPart', 'length', 'id')
     
-        # go back into object mode
-        bpy.ops.object.mode_set(mode='OBJECT')
+    def __init__(self, tree, stemT, parentMatrix, length, id, parentId): 
+            self.length = length
+            self.id = id
+            scaleMatrix = Matrix.Diagonal(Vector((1.0,1.0,length,1.0)))
+            self.meshPart = MeshPart(id, stemT.meshR, tree.rig, parentId,
+                                     boneLength = length, connected = True,
+                                     inheritScale = 'ALIGNED',
+                                     worldMatrix = parentMatrix, 
+                                     scaleMatrix = scaleMatrix)
+                                     
+            
+    def update(self, secondaryGrowth):
+        pass
+        #do secondary growth
+        
+                                     
+# Leaf part
+class Leaf:
+    __slots__ = ('meshPart', 'clorophyll')
     
+    def __init__(self, tree, leafT, parentMatrix, id, parentId):
+        size = leafT.sizeR.get()
+        scaleMatrix = Matrix.Diagonal(Vector((size, size, size, 1.0)))
+        self.meshPart = MeshPart(id, leafT.meshR, tree.rig, parentId,
+                                 boneLength = size, connected = False,
+                                 inheritScale = 'NONE',
+                                 worldMatrix = parentMatrix, 
+                                 scaleMatrix = scaleMatrix)
+        self.clorophyll = 1.0
     
-    # Update the bud with the given potential.
+    # update leaf clorophyll 
+    # return whether the leaf is still on the tree
+    def update(self, loss):
+        self.clorophyll -= loss
+        if self.clorophyll < 0:
+            self.fall()
+            return True
+        return False
+        
+    # make the leaf fall
+    def fall(self):
+        pass
+        
+# Flower/Fruit part
+class Flower:
+    __slots__ = ('flowerMeshPart',
+                 'fruitMeshPart',
+                 'potential',
+                 'isFruit')
+    def __init__(self, tree, flowerT, parentMatrix, flowerId, fruitId, parentId):
+        size = flowerT.sizeR.get()
+        scaleMatrix = Matrix.Diagonal(Vector((size, size, size, 1.0)))
+        self.flowerMeshPart = MeshPart(flowerId, flowerT.flowerMeshR,
+                                 tree.rig, parentId,
+                                 boneLength = size, connected = False,
+                                 inheritScale = 'NONE',
+                                 worldMatrix = parentMatrix, 
+                                 scaleMatrix = scaleMatrix)
+        self.fruitMeshPart = MeshPart(fruitId, flowerT.fruitMeshR,
+                                 tree.rig, parentId,
+                                 boneLength = size, connected = False,
+                                 inheritScale = 'NONE',
+                                 worldMatrix = parentMatrix, 
+                                 scaleMatrix = scaleMatrix)
+        self.potential = 0
+        self.isFruit = False
+        
+        
     def update(self, potential):
         self.potential += potential
-        if (potential > 1):
-            return self.type.sprout()
-        
+        if not self.isFruit and self.potential > 1:
+            self.makeFruit()
+        if self.potential > 2: # isFruit = True
+            self.fall()
+            return True
+        return False
+                
+    def makeFruit(self):
+        self.isFruit = True
+        #todo
+    
+    def fall(self):
+        pass
+    
+            
 
     
         
+            
 
-# A woody segment of the tree between 2 consecutive nodes. Features secondary growth (widening)   
-class Stem(TreePart):
-    __slots__ = 'length'
-    name = "Stem"
+
+            
     
-    def __init__(self, randomMesh, parentMatrix, length, rig, parentBone): 
-        self.length = length
-        scaleMatrix = Matrix.Diagonal(Vector((1.0,1.0,length,1.0)))
-        TreePart.__init__(self, randomMesh, rig, parentBone, length,
-                          parentMatrix, scaleMatrix)
-        
-        
-# Tree class  
+    
+# Main tree class
 #---------------------------------------------------------------------------------  
 
 class Tree:
     
-    def __init__(self, budCollection, stemMeshR, budMeshR):
-        self.stemMeshR = stemMeshR
-        self.budMeshR = budMeshR
+    
+    
+    def __init__(self, budCollection, startBudT):
         self.budCollection = budCollection
         
-        (self.rig, self.pivotBone) = self.createRig()
+        self.createRig()
         
         # age of the tree in years
         self.age = 0
         # current day in the year
         self.currDay = 1
         
-        # all tree parts
-        self.stems = []
+        #id generator
+        self.idGen = 1 
+        
+        # all tree leaves
+        self.leaves = []
+        self.fallenLeaves = []
+        
+        # all tree flowers
+        self.flowers = []
+        self.fallenFlowers = []
+        
+        # create root stem
+        stemT = StemTemplate(RandomMesh(['default']))
+        
+        self.root = Stem(self, stemT, Matrix.Translation((0, 0, -1.0)), 1.0, self.getId(), 0)
+        
+        # all tree stems
+        self.stems = [self.root]
         
         # create starting bud
-        budT = BudTemplate(index = 0, 
-                           brcAngleR = RV(0.0,20.0),
-                           divAngleR = RV(0.0,60.0),
-                           rollAngleR = RV(0.0,180.0)
-                          )
-                          
-        startBud = Bud(budMeshR, self.rig, budCollection, Matrix.Identity(4), budT)
+        startBud = Bud(self, startBudT, Matrix.Identity(4), self.root)
         
+        
+        # all tree buds
         self.buds = [startBud]
-        
-        # random meshes
-        self.stemMeshR = stemMeshR
-        self.budMeshR = budMeshR
+    
+    def getId(self):
+        id = self.idGen
+        self.idGen += 1
+        return id
     
     def createRig(self):
         # the armature of the tree
         armature = bpy.data.armatures.new('TreeArmature')
 
         # create a rig and link it to the collection
-        rig = bpy.data.objects.new('TreeRig', armature)
-        bpy.context.scene.collection.objects.link(rig)
+        self.rig = bpy.data.objects.new('TreeRig', armature)
+        bpy.context.scene.collection.objects.link(self.rig)
         
-        # select the armature
-        bpy.context.view_layer.objects.active = rig
-        # go into edit mode to add bones
-        bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-        # add a bone to the armature
-        pivotBone = rig.data.edit_bones.new('bone_0')
-        pivotBone.tail = (0.0, 0.0, 0.0)
-        pivotBone.head = (0.0, 0.0, -0.2)
-        
-        # go back into object mode
-        bpy.ops.object.mode_set(mode='OBJECT')
-        
-        return (rig, pivotBone)
+        createBone(self.rig, 'bone_0', (0.0, 0.0, -1.2), (0.0, 0.0, -1.0))
 
     
     def complete(self):
         # deselect all objects
         bpy.ops.object.select_all(action='DESELECT')
 
-        #select all branches
+        #select all tree parts
         for stem in self.stems:
-            stem.obj.select_set(True)
-            
-        for bud in self.buds:
-            bud.obj.select_set(True)
-            
-        #set rig to be active object
-        bpy.context.view_layer.objects.active = self.buds[0].obj
-
+            stem.meshPart.obj.select_set(True)
+        for leaf in self.leaves + self.fallenLeaves:
+            leaf.meshPart.obj.select_set(True)
+        for flower in self.flowers + self.fallenFlowers:
+            flower.flowerMeshPart.obj.select_set(True)
+            flower.fruitMeshPart.obj.select_set(True)
+        
+        #set branch to be active object
+        bpy.context.view_layer.objects.active = self.root.meshPart.obj
 
         #join the object together
         bpy.ops.object.join()
@@ -341,74 +465,126 @@ class Tree:
         treemesh.modifiers.new(name = 'Armature', type = 'ARMATURE')
         treemesh.modifiers['Armature'].object = self.rig
     
+    
     # time - number of days to simulate growth for
     def grow(self, time = 1):
         for i in range(1, ITERATIONS + 1, 1):
             print("ITERATION " + str(i))
-            added = []
+            # Buds that are spawned this iteration
+            addedBuds = []
             
-            for bud in self.buds:
-                growthRule = bud.update(2)
-                if growthRule is not None:
-                    oldParentMatrix = bud.obj.matrix_world
-                        
-                    length = growthRule.stemT.lengthRatioR.get()
-                    parentBone = self.pivotBone 
-                       
-                    if bud.stem is not None:
-                        length *= bud.stem.length
-                        parentBone = bud.stem.bone
-                       
-                    if (length < 0):
-                        length = 0
+            # Update buds
+            for bud in list(self.buds):
+                growthRule = bud.update(0.6,0.1)
+                
+                # Grow into a shoot
+                if type(growthRule) is ShootGrowthRule:
                     
+                    oldParentMatrix = bud.worldMatrix
                     
-                    stem = Stem(self.stemMeshR, oldParentMatrix, length, self.rig, parentBone)
+                    stemT = growthRule.stemT
+                    budT = growthRule.apiBudT
+                    axilTs = growthRule.axilTs
+                    
+                    stemLength = bud.stem.length * growthRule.lengthRatioR.get()
+                    
+                    parentId = bud.stem.id
+                    
+                    # create stem
+                    stem = Stem(self, stemT, oldParentMatrix, 
+                                stemLength, self.getId(), parentId)
                     self.stems.append(stem)
                     
-                    parentMatrix = oldParentMatrix @ Matrix.Translation((0, 0, length))
                     
+                    parentMatrix = oldParentMatrix @ Matrix.Translation((0,0,stemLength))
+                     
                     # renew apical bud
-                    budT = growthRule.apiBudT
-                    bud.renew(budCollection, 
-                              self.rig,
-                              parentMatrix, 
-                              budT,
-                              stem
-                              )
+                    bud.renew(self, budT, parentMatrix, stem)
                     
-                    for axiBudT in growthRule.axiBudTs:
-                        axiBud = Bud(budMeshR,
-                                     budCollection,
-                                     self.rig,
-                                     parentMatrix,
-                                     axiBudT,
-                                     stem,
-                                     bud
-                                     )
-                        added.append(axiBud)
+                    # create axillary buds and leaves
+                    for (axiBudT, leafT) in axilTs:
+                        axiBud = Bud(tree, axiBudT, parentMatrix, stem, bud)
+                        
+                        leafWorldMatrix = axiBud.worldMatrix
+                        leaf = Leaf(tree, leafT, leafWorldMatrix, 
+                                    self.getId(), parentId)
+                        addedBuds.append(axiBud)
+                        self.leaves.append(leaf)
+                    
+                # Grow into a flower
+                elif type(growthRule) is FlowerGrowthRule:
+                    parentMatrix = bud.worldMatrix
+                    
+                    flowerT = growthRule.flowerT
+                    
+                    parentId = bud.stem.id
+                    
+                    # create flower
+                    flower = Flower(self, flowerT, parentMatrix, 
+                                    self.getId(), self.getId(), parentId)
+                    self.flowers.append(flower)
+                    
+                    # remove bud
+                    self.buds.remove(bud)
+                    bud.done()
+                    
+            self.buds.extend(addedBuds)        
+             
+            # Update stems
+            self.root.update(1.0) # enough to do secondary growth on root stem
             
-            self.buds.extend(added)
-        
+            # Update leaves
+            for leaf in list(self.leaves):
+                hasFallen = leaf.update(0.0)
+                if hasFallen:
+                    self.leaves.remove(leaf)
+                    self.fallenLeaves.append(leaf)
+                
+            # Update flowers
+            for flower in list(self.flowers):
+                hasFallen = flower.update(1.0)     
+                if hasFallen:
+                    self.flowers.remove(flower)
+                    self.fallenFlowers.append(flower)
+            
+
+
+#example
         
 stemMeshR = RandomMesh(['stem'])
-budMeshR = RandomMesh(['bud'])
 
-budCollection = BudCollection()
-budT = BudTemplate(index = 0, 
+stemT = StemTemplate(RandomMesh(['stem']))
+
+leafT = LeafTemplate(RandomMesh(['leaf']), RV(0.2, 0.01))
+
+flowerT = FlowerTemplate(RM(['flower']), RM(['fruit']), RV(0.2, 0.01))
+
+startBudT = BudTemplate(index = 0, dominance = 1.0,
+                        brcAngleR = RV(0.0,20.0),
+                        divAngleR = RV(0.0,60.0),
+                        rollAngleR = RV(0.0,180.0),
+                        )
+budT = BudTemplate(index = 0, dominance = 1.0,
                     brcAngleR = RV(0.0,3.0),
                     divAngleR = RV(0.0,1.0),
                     rollAngleR = RV(180.0,30.0)
                     )
                     
-budT1 = BudTemplate(index = 0, 
+budT1 = BudTemplate(index = 0, dominance = 2.0,
                     brcAngleR = RV(60.0,2.0),
                     divAngleR = RV(180.0,30.0),
                     rollAngleR = RV(0.0,1.0)
                     )
                     
-budCollection.add(0, [BudRule(StemTemplate(RV(0.7,0.05)), budT, [budT1, budT1, budT1])], [1.0])
+shootRule = ShootGrowthRule(stemT, RV(0.6,0.01), budT, [(budT1, leafT), (budT1, leafT)])
+flowerRule = FlowerGrowthRule(flowerT)
+budCollection = BudCollection()
 
-tree = Tree(budCollection, stemMeshR, budMeshR)
+
+                    
+budCollection.add(0, [shootRule], [1.0], flowerRule)
+
+    
+tree = Tree(budCollection, startBudT)
 tree.grow()
 tree.complete()
