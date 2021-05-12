@@ -27,17 +27,15 @@ def clock():
 # Random stuff :)
 #---------------------------------------------------------------------------------
 
-# Represents a random 1D value based on an underlying truncated normal distribution
+# Represents a random uniformly distributed variable
 class RandomValue(NamedTuple):
     mean: float
     error: float
         
     # get deterministic value
     def get(self):
-        x =  numpy.random.normal(self.mean, self.error/3, None)
-        if abs(x - self.mean) > x:
-            x = numpy.random.uniform(self.mean - self.error, 
-                                     self.mean + self.error, None)
+        x =  numpy.random.uniform(self.mean - self.error, 
+                                  self.mean + self.error, None)
         return x
     
 RV = RandomValue
@@ -329,6 +327,9 @@ class Bud:
             
         # update shoot potential
         self.shootPotential -= 1
+        
+        # set the flower potential
+        self.flowerPotential = 0
             
         # calculate the world transform of the bud from the budT angles
         divAngle = math.radians(budT.divAngleR.get())
@@ -350,11 +351,27 @@ class Bud:
             distance = (self.apicalBud.worldMatrix.to_translation() - self.worldMatrix.to_translation()).length
             if distance / self.apicalBud.dominance < 1:
                 isInhibited = True
-
-        if self.shootPotential > 1 and not isInhibited:
-            return self.type.shootGrowth()
-        elif self.flowerPotential > 1 and self.age > 0:
+        '''print(self.shootPotential)
+        print(self.flowerPotential)
+        print(self.age)'''
+        '''if self.flowerPotential > 1 and self.age > 0:
+            print("flower")
             return self.type.flowerGrowth()
+        elif self.shootPotential > 1:
+            if not isInhibited:
+                return self.type.shootGrowth()
+            else:
+                self.shootPotential -= 1'''
+        if self.shootPotential > 1:
+            if not isInhibited:
+                return self.type.shootGrowth()
+            else:
+                self.shootPotential -= 1
+        if self.flowerPotential > 1 and self.age > 0:
+            return self.type.flowerGrowth()
+
+                
+        
         return None
     
     # When the bud disappears, it has no influence over the child buds
@@ -403,7 +420,7 @@ class Stem:
         self.length = parentLength * stemT.lengthRatioR.get()
         self.id = id
         self.secondaryGrowthGain = 0.0
-        scaleMatrix = Matrix.Diagonal(Vector((self.length,1.0,self.length,1.0)))
+        scaleMatrix = Matrix.Diagonal(Vector((1.0,1.0,self.length,1.0)))
         self.meshPart = MeshPart(id, stemT.meshR, tree.rig, parentId,
                                  boneLength = self.length, connected = True,
                                  inheritScale = 'NONE',
@@ -412,14 +429,14 @@ class Stem:
             
         #animate sprouting (primary growth)
         self.thick = parentThick * 0.9
-        self.meshPart.addKeyframe('scale',(self.length,0.0,self.length), startFrame)
-        self.meshPart.addKeyframe('scale',(0.0,0.7,0.0), endFrame + 20.0*self.length, relative = True)
+        self.meshPart.addKeyframe('scale',(0.0,0.0,0.0), startFrame)
+        self.meshPart.addKeyframe('scale',(self.thick,0.7,self.thick), endFrame + 20.0*self.length, relative = True)
         self.meshPart.addKeyframe('scale',(0.0,0.3,0.0), endFrame + 40.0*self.length, relative = True)
             
                                      
     def update(self, secondaryGrowth, frame):
-        self.secondaryGrowthGain += secondaryGrowth*0.01
-        if (self.secondaryGrowthGain > 0.1):
+        self.secondaryGrowthGain += secondaryGrowth*0.05 * self.thick
+        if (self.secondaryGrowthGain > 0.2):
             gain = self.secondaryGrowthGain
             self.meshPart.addKeyframe('scale',(gain,0.0,gain), frame, relative = True)
             self.secondaryGrowthGain = 0.0
@@ -430,7 +447,8 @@ class Stem:
 class Leaf:
     __slots__ = ('meshPart', 'clorophyll', 'colour')
     
-    def __init__(self, tree, leafT, parentMatrix, id, parentId, startFrame, endFrame):
+    def __init__(self, tree, leafT, parentMatrix, 
+                 id, parentId, startFrame, endFrame):
         size = leafT.sizeR.get()
         scaleMatrix = Matrix.Diagonal(Vector((size, size, size, 1.0)))
         self.meshPart = MeshPart(id, leafT.meshR, tree.rig, parentId,
@@ -466,8 +484,8 @@ class Leaf:
         rframe = frame + int(numpy.random.uniform(0,10, None))
         self.meshPart.addKeyframe('location',(0.0,0.0,0.0), rframe, relative = True)
         self.meshPart.addKeyframe('location',(0.0,0.1,0.0), rframe+1, relative = True)
-        self.meshPart.addKeyframe('location',(0.0,0.2,-0.7), rframe + 10, relative = True)
-        self.meshPart.addKeyframe('location',(0.0,0.1,-0.3), rframe + 31, relative = True)
+        self.meshPart.addKeyframe('location',(0.0,0.15,-0.3), rframe + 10, relative = True)
+        self.meshPart.addKeyframe('location',(0.0,0.1,-0.1), rframe + 31, relative = True)
         self.meshPart.addKeyframe('scale',(1.0,1.0,1.0), rframe +30)
         self.meshPart.addKeyframe('scale',(0.0,0.0,0.0), rframe +31)
         
@@ -497,33 +515,37 @@ class Flower:
         
         #animate sprouting
         self.flowerMeshPart.addKeyframe('scale',(0.0,0.0,0.0), startFrame)
-        self.flowerMeshPart.addKeyframe('scale',(1.0,1.0,1.0), startFrame + 30)
+        self.flowerMeshPart.addKeyframe('scale',(1.0,1.0,1.0), startFrame + 10)
         self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), startFrame)
         
         
     def update(self, potential, frame):
         self.potential += potential
         if not self.isFruit and self.potential > 1:
-            self.flowerMeshPart.addKeyframe('scale',(1.0,1.0,1.0), frame)
-            self.flowerMeshPart.addKeyframe('scale',(0.0,0.0,0.0), frame)
-            self.makeFruit()
+            rframe = frame + int(numpy.random.uniform(0,6, None))
+            self.flowerMeshPart.addKeyframe('location',(0.0,0.0,0.0), rframe, relative = True)
+            self.flowerMeshPart.addKeyframe('location',(0.0,-1.0,0.0), rframe + 10, relative = True)
+            self.flowerMeshPart.addKeyframe('scale',(1.0,1.0,1.0), frame + 9)
+            self.flowerMeshPart.addKeyframe('scale',(0.0,0.0,0.0), frame + 10)
+            self.makeFruit(frame)
         if self.potential > 2: # isFruit = True
             self.fall(frame)
             return True
         return False
                 
-    def makeFruit(self):
+    def makeFruit(self,frame):
         self.isFruit = True
-        
+        self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), frame)
+        self.fruitMeshPart.addKeyframe('scale',(1.0,1.0,1.0), frame + 15)
         #todo
     
     def fall(self, frame):
         rframe = frame + int(numpy.random.uniform(0,10, None))
         self.fruitMeshPart.addKeyframe('location',(0.0,0.0,0.0), rframe, relative = True)
-        self.fruitMeshPart.addKeyframe('location',(0.0,0.0,-0.3), rframe + 7, relative = True)
-        self.fruitMeshPart.addKeyframe('location',(0.0,0.0,-0.7), rframe + 14, relative = True)
-        self.fruitMeshPart.addKeyframe('scale',(1.0,1.0,1.0), rframe +14)
-        self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), rframe +15)
+        self.fruitMeshPart.addKeyframe('location',(0.0,-2.5,0.0), rframe + 20, relative = True)
+        self.fruitMeshPart.addKeyframe('location',(0.0,-7.0,0.0), rframe + 40, relative = True)
+        self.fruitMeshPart.addKeyframe('scale',(1.0,1.0,1.0), rframe +40)
+        self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), rframe +41)
     
             
 
@@ -711,11 +733,15 @@ class Tree:
                         addedBuds.append(axiBud)
                         
                         if numpy.random.uniform(0.0, 1.0, None) <= leafGrowth:
+                            
                             translation = axiBud.worldMatrix.to_translation()
+                            
                             z = parentMatrix.to_euler('ZXY').z
-                            rotation = Euler((0.0, math.radians(90), z), 'YZX').to_matrix().to_4x4()
-                            leafWorldMatrix = Matrix.Translation(translation) @ rotation 
-                            leaf = Leaf(tree, leafT, leafWorldMatrix, 
+                            y = math.radians(RV(90.0,20.0).get())
+                            x = math.radians(RV(0.0,10.0).get())
+                            rotation = Euler((x,y,z),'YZX').to_matrix().to_4x4()
+                            leafWorldMatrix = Matrix.Translation(translation) @ rotation
+                            leaf = Leaf(tree, leafT, leafWorldMatrix,
                                         self.getId(), parentId, startFrame, endFrame)
                             
                             self.leaves.append(leaf)
@@ -729,21 +755,24 @@ class Tree:
                     parentId = bud.stem.id
                     
                     # create flower
-                    if numpy.random.uniform(0.0, 1.0, None) <= leafGrowth:
+                    if numpy.random.uniform(0.0, 1.0, None) <= flowerGrowth:
+                        print("flower")
                         parentMatrix = bud.worldMatrix
                         
                         translation = parentMatrix.to_translation()
-                        z = parentMatrix.to_euler('ZXY').z
-                        rotation = Euler((0.0, math.radians(90), z), 'YZX').to_matrix().to_4x4()
+                        z = math.radians(RV(0.0,90.0).get())
+                        rotation = Euler((0, 0, z), 'YZX').to_matrix().to_4x4()
                         flowerWorldMatrix = Matrix.Translation(translation) @ rotation 
                         
                         flower = Flower(self, flowerT, flowerWorldMatrix, self.getId(), 
                                         self.getId(), parentId, startFrame, endFrame)
                         self.flowers.append(flower)
                     
-                    # remove bud
-                    self.buds.remove(bud)
-                    bud.done()
+                        # remove bud
+                        self.buds.remove(bud)
+                        bud.done()
+                    else:
+                        bud.flowerPotential -= 1
                     
             self.buds.extend(addedBuds)        
              
@@ -770,43 +799,118 @@ class Tree:
             
 
 
-#example
+#Oak
         
-stemMeshR = RandomMesh(['OakTrunk'])
+trunkT = StemTemplate(RM(['OakTrunk']),RV(0.8,0.1))
+mainT = StemTemplate(RM(['Stem']),RV(0.84,0.1))
+branchT = StemTemplate(RM(['Stem']), RV(0.84,0.1))
+twigT = StemTemplate(RM(['Stem']), RV(0.84,0.1))
 
-stemT = StemTemplate(stemMeshR, RV(0.77,0.1))
+leafT = LeafTemplate(RandomMesh(['OakLeaf0','OakLeaf1']), RV(0.3,0.01))
+flowerT = FlowerTemplate(RM(['OakFlower']), RM(['Acorn']), RV(0.3, 0.03))
 
-leafT = LeafTemplate(RandomMesh(['leaf']), RV(0.4, 0.2))
 
-flowerT = FlowerTemplate(RM(['flower']), RM(['fruit']), RV(0.2, 0.01))
-
-startBudT = BudTemplate(index = 0, dominance = 1.0,
-                        brcAngleR = RV(0.0,20.0),
+startBudT = BudTemplate(index = 0, dominance = 8.0,
+                        brcAngleR = RV(0.0,1.0),
                         divAngleR = RV(0.0,60.0),
-                        rollAngleR = RV(0.0,180.0),
+                        rollAngleR = RV(0.0,270.0),
                         )
-budT = BudTemplate(index = 0, dominance = 0.4,
-                    brcAngleR = RV(0.0,3.0),
-                    divAngleR = RV(0.0,1.0),
-                    rollAngleR = RV(137.0,30.0)
-                    )
-                    
-budT1 = BudTemplate(index = 0, dominance = 0.2,
-                    brcAngleR = RV(60.0,2.0),
-                    divAngleR = RV(137.0,30.0),
-                    rollAngleR = RV(0.0,1.0)
-                    )
-                    
-shootRule = ShootGrowthRule(stemT, budT, [(budT1, leafT), (budT1, leafT)])
+
+budTtrunk = BudTemplate(index = 1, dominance = 2.0,
+                        brcAngleR = RV(0.0,15.0),
+                        divAngleR = RV(0.0,180.0),
+                        rollAngleR = RV(137.0,30.0)
+                        )
+
+budTmainApi = BudTemplate(index = 2, dominance = 2.0,
+                        brcAngleR = RV(10.0,10.0),
+                        divAngleR = RV(0.0,180.0),
+                        rollAngleR = RV(137.0,30.0)
+                        )
+budTmain = BudTemplate(index = 2, dominance = 1.0,
+                        brcAngleR = RV(50.0,10.0),
+                        divAngleR = RV(90.0,180.0),
+                        rollAngleR = RV(137.0,30.0)
+                        )
+                        
+budTbranchApi = BudTemplate(index = 3, dominance = 0.2,
+                        brcAngleR = RV(0.0,10.0),
+                        divAngleR = RV(80.0,180.0),
+                        rollAngleR = RV(137.0,20.0),
+                        )
+budTbranch = BudTemplate(index = 3, dominance = 0.1,
+                        brcAngleR = RV(40,10.0),
+                        divAngleR = RV(80.0,180.0),
+                        rollAngleR = RV(137.0,20.0),
+                        )
+                        
+budTtwigApi = BudTemplate(index = 4, dominance = 0.1,
+                        brcAngleR = RV(4.0,20.0),
+                        divAngleR = RV(180.0,180.0),
+                        rollAngleR = RV(137.0,20.0),
+                        )
+budTtwig = BudTemplate(index = 4, dominance = 0.1,
+                        brcAngleR = RV(40.0,20.0),
+                        divAngleR = RV(180.0,180.0),
+                        rollAngleR = RV(137.0,20.0),
+                        )
+                     
+rule00 = ShootGrowthRule(trunkT, budTtrunk, 
+        [(budTmain, leafT),(budTmain, leafT)])
+rule01 = ShootGrowthRule(trunkT, budTtrunk, 
+        [(budTmain, leafT)])
+rule02 = ShootGrowthRule(trunkT, budTtrunk, 
+        [])
+        
+rule10 = ShootGrowthRule(mainT, budTtrunk, 
+        [(budTmain, leafT),(budTmain, leafT)])
+rule11 = ShootGrowthRule(mainT, budTtrunk, 
+        [(budTmain, leafT)])
+rule12 = ShootGrowthRule(mainT, budTtrunk, 
+        [])
+rule13 = ShootGrowthRule(mainT, budTmainApi, 
+        [(budTmain, leafT)])
+
+rule20 = ShootGrowthRule(branchT, budTmainApi, 
+        [(budTbranch, leafT),(budTbranch, leafT)])
+rule21 = ShootGrowthRule(branchT, budTmainApi, 
+        [(budTbranch, leafT)])
+rule22 = ShootGrowthRule(branchT, budTmainApi, 
+        [])
+rule23 = ShootGrowthRule(branchT, budTbranchApi, 
+        [])
+        
+        
+rule30 = ShootGrowthRule(branchT, budTbranchApi, 
+        [(budTtwig, leafT),(budTtwig, leafT)])
+rule31 = ShootGrowthRule(branchT, budTbranchApi, 
+        [(budTtwig, leafT)])
+rule32 = ShootGrowthRule(branchT, budTtwigApi, 
+        [(budTtwig, leafT)])
+        
+rule40 = ShootGrowthRule(twigT, budTtwigApi, 
+        [(budTtwig, leafT),(budTtwig, leafT)])
+rule41 = ShootGrowthRule(twigT, budTtwigApi, 
+        [(budTtwig, leafT)])
+rule42 = ShootGrowthRule(twigT, budTtwigApi, 
+        [])
+                
+        
 flowerRule = FlowerGrowthRule(flowerT)
+
 budCollection = BudCollection()
 
 
                     
-budCollection.add(0, [shootRule], [1.0], flowerRule)
+budCollection.add(0, [rule00, rule01, rule02], [0.8,0.1, 0.1], flowerRule)
+budCollection.add(1, [rule10,rule11, rule12, rule13], [0.1,0.3,0.1,0.3], flowerRule)
+budCollection.add(2, [rule20,rule21, rule22, rule23], [0.1,0.5,0.1,0.3], flowerRule)
+budCollection.add(3, [rule30, rule31, rule32], [0.07,0.5,0.43], flowerRule)
+budCollection.add(4, [rule40, rule41,rule42], [0.15, 0.84, 0.01], flowerRule)
+
 
     
-fcurves = bpy.data.objects['TreeGrowthFunctions'].animation_data.action.fcurves
+fcurves = bpy.data.objects['OakGrowthFunctions'].animation_data.action.fcurves
 
 primaryGrowthF = GrowthFunction(fcurves.find('["primaryGrowthDay"]'),
                                 fcurves.find('["primaryGrowthYear"]'), 0.01)
@@ -817,7 +921,7 @@ secondaryGrowthF = GrowthFunction(fcurves.find('["secondaryGrowthDay"]'),
                                   fcurves.find('["secondaryGrowthYear"]'), 0.1)
 
 bloomingF = GrowthFunction(fcurves.find('["bloomingDay"]'),
-                           fcurves.find('["bloomingYear"]'), 0.01)
+                           fcurves.find('["bloomingYear"]'), 0.1)
 
 fruitGrowthF = GrowthFunction(fcurves.find('["fruitGrowthDay"]'),
                               fcurves.find('["fruitGrowthYear"]'), 0.05)
@@ -829,9 +933,9 @@ leafDecayF = GrowthFunction(fcurves.find('["leafDecayDay"]'),
 tree = Tree(budCollection, startBudT, 
             primaryGrowthF, secondaryGrowthF, bloomingF, fruitGrowthF, leafDecayF)
     
-tree.grow(730, 1.0, 1.0)
-tree.grow(730, 1.0, 1.0)
-tree.grow(1200, 1.0, 0.2)
+tree.grow(4380, 1.0, 1.0)
+tree.grow(1410, 1.0, 0.4)
+
      
 print("growing done")
 clock()
