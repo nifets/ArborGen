@@ -32,37 +32,44 @@ class RandomValue(NamedTuple):
     mean: float
     error: float
         
-    # get deterministic value
+    # Sample the RV
     def get(self):
         x =  numpy.random.uniform(self.mean - self.error, 
-                                  self.mean + self.error, None)
+                                  self.mean + self.error, 
+                                  None)
         return x
     
 RV = RandomValue
 
+
 # Represents a mesh which can vary in appearance
 class RandomMesh:
     def __init__(self, meshNames):
-        # all possible meshes 
+        # All possible meshes 
         self.meshes = []
         for name in meshNames:
             self.meshes.append(bpy.data.objects[name])
             
-    # get deterministic mesh
+    # Get deterministic mesh
     def get(self):
-        # choose a mesh uniformly at random
-        initMesh = random.choice(self.meshes)
+        # Choose a mesh uniformly at random
+        srcMesh = random.choice(self.meshes)
         
-        mesh = initMesh.copy()
-        # important, so that mesh data is not linked to the original
+        #Duplicate the source mesh
+        mesh = srcMesh.copy()
+        
+        # Important, so that mesh data is not linked to the original
         mesh.data = initMesh.data.copy()
+        
+        #Add the mesh to the collection
         bpy.context.collection.objects.link(mesh)
         return mesh
 
 RM = RandomMesh
 
 
-# Bone stuff
+
+# Blender utility
 #---------------------------------------------------------------------------------
 
 # Doing ops inside the script has a lot of overhead, so instead of
@@ -72,7 +79,7 @@ RM = RandomMesh
 editBonesQ = []
 keyframesQ = []
 
-# add edit bone to queue
+# Add an edit bone to the queue
 def createBone(id, headLoc, tailLoc, parentId = None, 
                connected = False, inheritScale = 'NONE', inheritRotation = True):
                    
@@ -87,56 +94,60 @@ def createBone(id, headLoc, tailLoc, parentId = None,
                       parentName, connected, inheritScale, inheritRotation))
     return name
                       
-# add the edit bones to the rig
+# Flush the edit bones queue, adding the bones to the rig
 def flushEditBonesQ(rig):
-    # select the armature
+    # Select the armature
     bpy.context.view_layer.objects.active = rig
-    # go into edit mode to add bones
+    
+    # Need to go into edit mode to add the bones
     bpy.ops.object.mode_set(mode='EDIT', toggle=False)
     
+    # Add the bones to the rig
     for task in editBonesQ:
         (name, headLoc, tailLoc, parentName, connected, 
          inheritScale, inheritRotation) = task
         makeEditBone(rig, name, headLoc, tailLoc, 
                       parentName, connected, inheritScale, inheritRotation)
                       
-    # go back into object mode
+    # Go back into object mode
     bpy.ops.object.mode_set(mode='OBJECT')
         
-# add an individual edit bone to the rig
+
+# Add an individual edit bone to the rig
 def makeEditBone(rig, name, headLoc, tailLoc, parentName = None, 
-               connected = False, inheritScale = 'NONE', inheritRotation = True):
+                 connected = False, inheritScale = 'NONE', inheritRotation = True):
                    
     
-    # need to be in edit mode to add edit bones
+    # Make sure we are in edit mode
     assert bpy.context.object.mode == 'EDIT'
     
-    # add a bone to the armature
+    # Add a bone to the armature
     bone = rig.data.edit_bones.new(name)
     bone.head = headLoc
     bone.tail = tailLoc
     
-    # set parent if applicable
+    # Set parent if applicable
     if parentName is not None:
         parent = rig.data.edit_bones[parentName]
         bone.parent = parent
     
-    # set properties
+    # Set properties
     bone.use_connect = connected
     bone.inherit_scale = inheritScale
     bone.use_inherit_rotation = inheritRotation
     
-    
+# Add the keyframe to the queue
 def addKeyframe(boneName, type, transform, frame, relative = False):
     keyframesQ.append((boneName, type, transform, frame, relative))
     
+# Flush the keyframes and add them to the rig
 def flushKeyframesQ(rig):
     for task in keyframesQ:
         (boneName, type, transform, frame, relative) = task
         makeKeyframe(rig, boneName, type, transform, frame, relative)
     
     
-# create the actual keyframe
+# Add the keyframe to the specific bone in the rig
 def makeKeyframe(rig, boneName, type, transform, frame, relative):
     bone = rig.pose.bones[boneName]
     if type == 'scale':
@@ -151,9 +162,6 @@ def makeKeyframe(rig, boneName, type, transform, frame, relative):
         bone.keyframe_insert('location', frame = frame)
         
     
-
-
-
 # Create a vertex group that assigns full weights to the bone with the given name
 def createVertexGroup(name, object):
     #assign vertex group weight
@@ -164,34 +172,29 @@ def createVertexGroup(name, object):
     group.add(verts, 1.0, 'ADD')
     
     
-    
-
-# Growth Function 
+# Growth Functions
 #---------------------------------------------------------------------------------
 
+# The growth function describes the development of different aspects of the tree
+# (such as primary/secondary growth, flower growth, etc.)
+# It is represented by 2 fcurves (blender objects acting as 1 dimensional functions)
+# The day curve describes the growth over a year
+# The year curve gives how potent this growth is over a certain year in the tree's lifetime
+# The error variable is used to give variance to the evaluated growth 
 class GrowthFunction:
-    def __init__(self, fcurveDay, fcurveYear, stddev):
-        self.fcurveDay = fcurveDay
+    def __init__(self, fcurveDay, fcurveYear, error):
+        self.fcurveDay = fcurveDay  
         self.fcurveYear = fcurveYear
-        self.stddev = stddev
+        self.error = error
         
     def evaluate(self, year, startDay, endDay):
         yearModifier = self.fcurveYear.evaluate(year)
         mean = self.fcurveDay.evaluate(endDay) - self.fcurveDay.evaluate(startDay)
         
-        '''print("end day and start dayv value")
-        print(self.fcurveDay.evaluate(endDay))
-        print(self.fcurveDay.evaluate(startDay))'''
-        
-        
         if (endDay < startDay): # if end day is in the next year
             mean += self.fcurveDay.evaluate(365)
-            
-        '''print("mean and year mod")
-        print(mean)
-        print(yearModifier)'''
         
-        return RV(mean * yearModifier, self.stddev)
+        return RV(mean * yearModifier, self.error)
         
         
 # Tree part templates
@@ -201,8 +204,9 @@ class GrowthFunction:
 # Production rule for a stem segment
 class StemTemplate(NamedTuple):
     meshR: RandomMesh # mesh of the stem
-    lengthRatioR: RV       # length of the stem
+    lengthRatioR: RV  # length of the stem
 
+# Production rule for a leaf
 class LeafTemplate(NamedTuple):
     meshR: RandomMesh # mesh of the leaf
     sizeR: RV         # size of the leaf
@@ -228,11 +232,8 @@ class BudTemplate(NamedTuple):
     
 # Bud Growth Logic  
 #---------------------------------------------------------------------------------    
-    
 
-    
 # Production Rules
-
 class ShootGrowthRule(NamedTuple):
     stemT: StemTemplate 
     apiBudT: BudTemplate # apical bud
@@ -245,7 +246,7 @@ class FlowerGrowthRule(NamedTuple):
 # Describes what a specific bud type can grow into
 # This class is tightly-coupled with BudCollection 
 # Instances should only be created by using BudCollection.add
-# (not sure how to enforce this -- my python expertise -> 0
+# (not sure how to enforce this -- my python expertise -> 0)
 class BudType:
     def __init__(self, shootRules, shootWeights, flowerRule):
         self.shootRules = shootRules
@@ -293,12 +294,13 @@ class Bud:
         'flowerPotential',# how close the bud is to growing into a flower
         'stem',           # the stem this bud is attached to 
         'apicalBud',      # the parent bud of this bud
-        'age',             # how many shoots the bud produced
-        'dominance'
+        'age',            # how many shoots the bud produced
+        'dominance'       # the apical dominance exhibited by this bud
     )
     
     def __init__(self, tree, budT, parentMatrix, parentStem, apicalBud = None):
 
+        # the age becomes 0 after renewing the bud
         self.age = -1
 
         # set the apical bud
@@ -345,23 +347,13 @@ class Bud:
     def update(self, shootPotential, flowerPotential):
         self.shootPotential += shootPotential
         self.flowerPotential += flowerPotential
-        # how much is the growth of this bud inhibited by the axilarry bud
+        # how much is the growth of this bud inhibited by the apical bud
         isInhibited = False
         if self.age is 0 and self.apicalBud is not None: #if axilarry bud
             distance = (self.apicalBud.worldMatrix.to_translation() - self.worldMatrix.to_translation()).length
             if distance / self.apicalBud.dominance < 1:
                 isInhibited = True
-        '''print(self.shootPotential)
-        print(self.flowerPotential)
-        print(self.age)'''
-        '''if self.flowerPotential > 1 and self.age > 0:
-            print("flower")
-            return self.type.flowerGrowth()
-        elif self.shootPotential > 1:
-            if not isInhibited:
-                return self.type.shootGrowth()
-            else:
-                self.shootPotential -= 1'''
+
         if self.shootPotential > 1:
             if not isInhibited:
                 return self.type.shootGrowth()
@@ -369,9 +361,6 @@ class Bud:
                 self.shootPotential -= 1
         if self.flowerPotential > 1 and self.age > 0:
             return self.type.flowerGrowth()
-
-                
-        
         return None
     
     # When the bud disappears, it has no influence over the child buds
@@ -379,6 +368,7 @@ class Bud:
         self.dominance = 0.0001
     
 
+# Generic tree part encapsulating the mesh and the bone controlling it
 class MeshPart:
     __slots__ = ('id', 'obj', 'boneName')
     def __init__(self, id, randomMesh, rig, parentId,
@@ -395,7 +385,6 @@ class MeshPart:
         self.obj.name = "mesh_" + str(self.id)
         
         #Create bone
-
         headLoc = worldMatrix.to_translation()
         tailLoc = (worldMatrix @ Matrix.Translation((0, 0, boneLength))).to_translation()
         
@@ -405,7 +394,8 @@ class MeshPart:
         #Create vertex group
         createVertexGroup(self.boneName, self.obj)
         
-    def addKeyframe(self, type, transform, frame, relative = False):# add a keyframe
+    # Add a keyframe to the bone controlling the mesh
+    def addKeyframe(self, type, transform, frame, relative = False):
         addKeyframe(self.boneName, type, transform, frame, relative)
         
         
@@ -434,16 +424,16 @@ class Stem:
         self.meshPart.addKeyframe('scale',(0.0,0.3,0.0), endFrame + 40.0*self.length, relative = True)
             
                                      
+    # Apply secondary growth
     def update(self, secondaryGrowth, frame):
         self.secondaryGrowthGain += secondaryGrowth*0.05 * self.thick
         if (self.secondaryGrowthGain > 0.2):
             gain = self.secondaryGrowthGain
             self.meshPart.addKeyframe('scale',(gain,0.0,gain), frame, relative = True)
             self.secondaryGrowthGain = 0.0
-        #do secondary growth
         
                                      
-# Leaf part
+# A single leaf
 class Leaf:
     __slots__ = ('meshPart', 'clorophyll', 'colour')
     
@@ -462,26 +452,22 @@ class Leaf:
         self.meshPart.addKeyframe('scale',(0.0,0.0,0.0), startFrame)
         self.meshPart.addKeyframe('scale',(0.5,0.5,0.5), endFrame + 20.0*size)
         self.meshPart.addKeyframe('scale',(1.0,1.0,1.0), endFrame + 60.0*size)
-        
-        # animate colour
-        '''self.colour = self.meshPart.obj.active_material.diffuse_color
-        self.meshPart.obj.active_material.keyframe_insert('diffuse_color', startFrame)'''
+
     
-    # update leaf clorophyll 
-    # return whether the leaf is still on the tree
+    # Update leaf clorophyll 
+    # Return whether the leaf is still on the tree
     def update(self, loss, frame):
         self.clorophyll -= loss
-        '''self.meshPart.obj.active_material.diffuse_color[1] = self.clorophyll * self.colour[1] 
-        self.meshPart.obj.active_material.diffuse_color[0] = (1-self.clorophyll) * self.colour[0]
-        self.meshPart.obj.active_material.keyframe_insert('diffuse_color', frame)'''
+
         if self.clorophyll < 0:
             self.fall(frame)
             return True
         return False
         
-    # make the leaf fall
+    # Make the leaf fall
     def fall(self,frame):
         rframe = frame + int(numpy.random.uniform(0,10, None))
+        # Animate the fall
         self.meshPart.addKeyframe('location',(0.0,0.0,0.0), rframe, relative = True)
         self.meshPart.addKeyframe('location',(0.0,0.1,0.0), rframe+1, relative = True)
         self.meshPart.addKeyframe('location',(0.0,0.15,-0.3), rframe + 10, relative = True)
@@ -493,7 +479,7 @@ class Leaf:
 class Flower:
     __slots__ = ('flowerMeshPart',
                  'fruitMeshPart',
-                 'potential',
+                 'potential', 
                  'isFruit')
     def __init__(self, tree, flowerT, parentMatrix, flowerId, fruitId, parentId, startFrame, endFrame):
         size = flowerT.sizeR.get()
@@ -510,19 +496,25 @@ class Flower:
                                  inheritScale = 'NONE',
                                  worldMatrix = parentMatrix, 
                                  scaleMatrix = scaleMatrix)
+                                 
+        # The potential describes the stage of growth of the flower/fruit part
+        # 0 < p <= 1: flower; 1 < p <= 2: fruit
         self.potential = 0
+        
         self.isFruit = False
         
-        #animate sprouting
+        # Animate sprouting
         self.flowerMeshPart.addKeyframe('scale',(0.0,0.0,0.0), startFrame)
         self.flowerMeshPart.addKeyframe('scale',(1.0,1.0,1.0), startFrame + 10)
         self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), startFrame)
         
-        
+    # Update the potential
     def update(self, potential, frame):
         self.potential += potential
         if not self.isFruit and self.potential > 1:
             rframe = frame + int(numpy.random.uniform(0,6, None))
+            
+            # Animate the flower disappearing
             self.flowerMeshPart.addKeyframe('location',(0.0,0.0,0.0), rframe, relative = True)
             self.flowerMeshPart.addKeyframe('location',(0.0,-1.0,0.0), rframe + 10, relative = True)
             self.flowerMeshPart.addKeyframe('scale',(1.0,1.0,1.0), frame + 9)
@@ -532,13 +524,15 @@ class Flower:
             self.fall(frame)
             return True
         return False
-                
+         
+    # Animate the fruit appearing      
     def makeFruit(self,frame):
         self.isFruit = True
         self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), frame)
         self.fruitMeshPart.addKeyframe('scale',(1.0,1.0,1.0), frame + 15)
-        #todo
+        
     
+    # Animate the fruit falling
     def fall(self, frame):
         rframe = frame + int(numpy.random.uniform(0,10, None))
         self.fruitMeshPart.addKeyframe('location',(0.0,0.0,0.0), rframe, relative = True)
@@ -547,14 +541,6 @@ class Flower:
         self.fruitMeshPart.addKeyframe('scale',(1.0,1.0,1.0), rframe +40)
         self.fruitMeshPart.addKeyframe('scale',(0.0,0.0,0.0), rframe +41)
     
-            
-
-    
-        
-            
-
-
-            
     
     
 # Main tree class
@@ -610,6 +596,7 @@ class Tree:
         self.leafDecayF = leafDecayF
         
     
+    # Tree part id generator
     def getId(self):
         id = self.idGen
         self.idGen += 1
@@ -625,7 +612,7 @@ class Tree:
         
         createBone(0, (0.0, 0.0, -1.2), (0.0, 0.0, -1.0))
 
-    
+    # Complete the creation of the tree animated model
     def complete(self):
         # create edit bones
         flushEditBonesQ(self.rig)
@@ -667,6 +654,7 @@ class Tree:
         treemesh.modifiers['Armature'].object = self.rig
     
     
+    # Simulate the growth of the tree 
     # time - number of days to simulate growth for
     def grow(self, time = 1, leafGrowth = 1.0, flowerGrowth = 1.0):
         for i in range(0, time, TIME_INTERVAL):
@@ -799,7 +787,7 @@ class Tree:
             
 
 
-#Oak
+#Templates, rules and growth functions for an Oak
         
 trunkT = StemTemplate(RM(['OakTrunk']),RV(0.8,0.1))
 mainT = StemTemplate(RM(['Stem']),RV(0.84,0.1))
